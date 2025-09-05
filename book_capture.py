@@ -1,8 +1,10 @@
+#!/usr/bin/env python3
 import os
 import time
+import glob
+import shutil
 import threading
 from datetime import datetime
-import glob
 
 import pyautogui
 from pynput import keyboard
@@ -71,27 +73,29 @@ def _img_file_order_ctime_asc(files):
         return (birth if birth else mtime, mtime, os.path.basename(p).lower())
     return sorted(files, key=times)
 
-def make_pdf_from_folder(folder, out_pdf="book.pdf", pattern="page_*.png"):
+def make_pdf_from_folder(folder, out_pdf_path, pattern="page_*.png"):
     files = [f for f in glob.glob(os.path.join(folder, pattern))
              if os.path.splitext(f)[1].lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff"}]
     if not files:
         print("[PDF] No images found to combine.")
-        return
+        return None
 
     files = _img_file_order_ctime_asc(files)  # oldest → newest
 
     # Try img2pdf (no recompression); fallback to Pillow
     try:
         import img2pdf
-        with open(os.path.join(folder, out_pdf), "wb") as f_out:
+        with open(out_pdf_path, "wb") as f_out:
             f_out.write(img2pdf.convert(files))
-        print(f"[PDF] Wrote {os.path.join(folder, out_pdf)} (via img2pdf)")
+        print(f"[PDF] Wrote {out_pdf_path} (via img2pdf)")
     except Exception as e:
         print(f"[PDF] img2pdf unavailable/failed ({e}). Falling back to Pillow…")
         imgs = [Image.open(p).convert("RGB") for p in files]
         first, rest = imgs[0], imgs[1:]
-        first.save(os.path.join(folder, out_pdf), save_all=True, append_images=rest)
-        print(f"[PDF] Wrote {os.path.join(folder, out_pdf)} (via Pillow)")
+        first.save(out_pdf_path, save_all=True, append_images=rest)
+        print(f"[PDF] Wrote {out_pdf_path} (via Pillow)")
+
+    return out_pdf_path
 
 # ---------- main capture ----------
 def main():
@@ -99,10 +103,13 @@ def main():
     delay_after_click = float(input("Delay after clicking Next (seconds, e.g., 1.0-1.5): ").strip() or "1.2")
     use_double_click = input("Double-click to advance? (y/n): ").strip().lower() == "y"
 
+    # Timestamp for this session (reuse consistently for run + PDF filename)
+    session_dt = datetime.now()
+
     # Save under ./bookraw/book_capture_YYYYMMDD_HHMMSS
     root_dir = os.path.join(os.getcwd(), "bookraw")
     os.makedirs(root_dir, exist_ok=True)
-    session_name = datetime.now().strftime("book_capture_%Y%m%d_%H%M%S")
+    session_name = session_dt.strftime("book_capture_%Y%m%d_%H%M%S")
     save_dir = os.path.join(root_dir, session_name)
     os.makedirs(save_dir, exist_ok=True)
     print(f"\nSaving images to: {save_dir}\n")
@@ -133,8 +140,25 @@ def main():
                 pyautogui.click(x, y)
             time.sleep(delay_after_click)
 
-    # Build PDF (oldest → newest within this run)
-    make_pdf_from_folder(save_dir, out_pdf="book.pdf", pattern="page_*.png")
+    # Build PDF inside the run folder
+    run_pdf_path = os.path.join(save_dir, "book.pdf")
+    made = make_pdf_from_folder(save_dir, out_pdf_path=run_pdf_path, pattern="page_*.png")
+
+    # Also place a human-named copy into ./PDF/
+    if made:
+        pdf_root = os.path.join(os.getcwd(), "PDF")
+        os.makedirs(pdf_root, exist_ok=True)
+
+        # Human-readable name: YYYY-Mon-D-HHMM.pdf  (e.g., 2025-Sep-5-1427.pdf)
+        human_name = f"{session_dt:%Y}-{session_dt:%b}-{session_dt.day}-{session_dt:%H%M}.pdf"
+        dest_pdf_path = os.path.join(pdf_root, human_name)
+
+        try:
+            shutil.copyfile(made, dest_pdf_path)
+            print(f"[PDF] Copied to {dest_pdf_path}")
+        except Exception as e:
+            print(f"[PDF] Could not copy to {dest_pdf_path}: {e}")
+
     print("\nDone!")
 
 if __name__ == "__main__":
