@@ -2,6 +2,7 @@ import os
 import time
 import threading
 from datetime import datetime
+import glob
 
 import pyautogui
 from pynput import keyboard
@@ -9,10 +10,9 @@ from PIL import Image
 
 pyautogui.FAILSAFE = True
 
+# ---------- helpers for key-captured points ----------
 def wait_for_key(label: str, target_key):
-    """
-    Waits until the user presses `target_key`, then returns the current mouse (x, y) as ints.
-    """
+    """Wait until user presses target_key, then return current mouse (x, y) as ints."""
     print(f"[{label}] Hover your mouse where you want, then press {target_key.name.upper()} …")
     pos_holder = {}
     done = threading.Event()
@@ -30,7 +30,6 @@ def wait_for_key(label: str, target_key):
     return pos_holder["xy"]
 
 def capture_next_button_xy():
-    # Press F8 while hovering the NEXT button
     return wait_for_key("Next Button", keyboard.Key.f8)
 
 def capture_region_by_keys():
@@ -53,7 +52,7 @@ def capture_region_by_keys():
     width  = right - left
     height = bottom - top
 
-    # Clamp to screen just in case
+    # Clamp to screen
     scr_w, scr_h = pyautogui.size()
     left   = max(0, min(left, scr_w - 1))
     top    = max(0, min(top,  scr_h - 1))
@@ -63,41 +62,65 @@ def capture_region_by_keys():
     print(f"[Region] Using rectangle: left={left}, top={top}, width={width}, height={height}")
     return (left, top, width, height)
 
-def images_to_pdf(img_paths, out_pdf):
-    imgs = [Image.open(p).convert("RGB") for p in img_paths]
-    if not imgs:
-        return
-    first, rest = imgs[0], imgs[1:]
-    first.save(out_pdf, save_all=True, append_images=rest)
-    print(f"[PDF] Wrote {out_pdf}")
+# ---------- PDF building (img2pdf preferred; Pillow fallback) ----------
+def _img_file_order_ctime_asc(files):
+    def times(p):
+        st = os.stat(p)
+        birth = getattr(st, "st_birthtime", None)
+        mtime = st.st_mtime
+        return (birth if birth else mtime, mtime, os.path.basename(p).lower())
+    return sorted(files, key=times)
 
+def make_pdf_from_folder(folder, out_pdf="book.pdf", pattern="page_*.png"):
+    files = [f for f in glob.glob(os.path.join(folder, pattern))
+             if os.path.splitext(f)[1].lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff"}]
+    if not files:
+        print("[PDF] No images found to combine.")
+        return
+
+    files = _img_file_order_ctime_asc(files)  # oldest → newest
+
+    # Try img2pdf (no recompression); fallback to Pillow
+    try:
+        import img2pdf
+        with open(os.path.join(folder, out_pdf), "wb") as f_out:
+            f_out.write(img2pdf.convert(files))
+        print(f"[PDF] Wrote {os.path.join(folder, out_pdf)} (via img2pdf)")
+    except Exception as e:
+        print(f"[PDF] img2pdf unavailable/failed ({e}). Falling back to Pillow…")
+        imgs = [Image.open(p).convert("RGB") for p in files]
+        first, rest = imgs[0], imgs[1:]
+        first.save(os.path.join(folder, out_pdf), save_all=True, append_images=rest)
+        print(f"[PDF] Wrote {os.path.join(folder, out_pdf)} (via Pillow)")
+
+# ---------- main capture ----------
 def main():
     total_pages = int(input("How many pages to capture? (e.g., 386): ").strip() or "1")
     delay_after_click = float(input("Delay after clicking Next (seconds, e.g., 1.0-1.5): ").strip() or "1.2")
     use_double_click = input("Double-click to advance? (y/n): ").strip().lower() == "y"
 
+    # Save under ./bookraw/book_capture_YYYYMMDD_HHMMSS
+    root_dir = os.path.join(os.getcwd(), "bookraw")
+    os.makedirs(root_dir, exist_ok=True)
     session_name = datetime.now().strftime("book_capture_%Y%m%d_%H%M%S")
-    save_dir = os.path.join(os.getcwd(), session_name)
+    save_dir = os.path.join(root_dir, session_name)
     os.makedirs(save_dir, exist_ok=True)
     print(f"\nSaving images to: {save_dir}\n")
 
-    next_xy = capture_next_button_xy()         # (int, int)
-    region  = capture_region_by_keys()         # (int, int, int, int)
+    next_xy = capture_next_button_xy()
+    region  = capture_region_by_keys()
 
-    # Give the viewer focus once without clicking near page corners
+    # Focus the viewer once (click inside region, not near corners)
     pyautogui.click(region[0] + 10, region[1] + 10)
     time.sleep(0.2)
 
-    img_paths = []
+    # Capture loop
     for i in range(1, total_pages + 1):
-        # 1) Screenshot region
         img = pyautogui.screenshot(region=region)
         path = os.path.join(save_dir, f"page_{i:04d}.png")
         img.save(path)
-        img_paths.append(path)
         print(f"[Capture] Saved {path}")
 
-        # 2) Advance page (skip last)
         if i < total_pages:
             x, y = next_xy
             pyautogui.moveTo(x, y, duration=0.4)
@@ -110,10 +133,11 @@ def main():
                 pyautogui.click(x, y)
             time.sleep(delay_after_click)
 
-    # Make a single PDF
-    out_pdf = os.path.join(save_dir, "book.pdf")
-    images_to_pdf(img_paths, out_pdf)
+    # Build PDF (oldest → newest within this run)
+    make_pdf_from_folder(save_dir, out_pdf="book.pdf", pattern="page_*.png")
     print("\nDone!")
 
 if __name__ == "__main__":
+    # Reminder: macOS Privacy & Security → enable Accessibility, Input Monitoring, and Screen Recording
+    # for your Terminal/VSCode and the Python binary you are using.
     main()
