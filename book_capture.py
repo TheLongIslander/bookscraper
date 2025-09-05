@@ -99,7 +99,15 @@ def make_pdf_from_folder(folder, out_pdf_path, pattern="page_*.png"):
 
 # ---------- main capture ----------
 def main():
-    total_pages = int(input("How many pages to capture? (e.g., 386): ").strip() or "1")
+    # Default = AUTO detection. Offer fixed-count override.
+    fixed_count = input("Capture a specific number of pages instead of auto-detecting the end? (y/n): ").strip().lower() == "y"
+    if fixed_count:
+        total_pages = int(input("How many pages to capture? (e.g., 386): ").strip() or "1")
+    else:
+        # Optional safety cap to avoid runaway loops (Enter for unlimited)
+        cap_str = input("Auto mode: Maximum pages cap? (press Enter for no cap): ").strip()
+        total_pages = int(cap_str) if cap_str else None
+
     delay_after_click = float(input("Delay after clicking Next (seconds, e.g., 1.0-1.5): ").strip() or "1.2")
     use_double_click = input("Double-click to advance? (y/n): ").strip().lower() == "y"
 
@@ -121,24 +129,48 @@ def main():
     pyautogui.click(region[0] + 10, region[1] + 10)
     time.sleep(0.2)
 
-    # Capture loop
-    for i in range(1, total_pages + 1):
+    prev_bytes = None
+    page_index = 0
+    while True:
+        page_index += 1
+
+        # 1) Screenshot region
         img = pyautogui.screenshot(region=region)
-        path = os.path.join(save_dir, f"page_{i:04d}.png")
+        path = os.path.join(save_dir, f"page_{page_index:04d}.png")
         img.save(path)
         print(f"[Capture] Saved {path}")
 
-        if i < total_pages:
-            x, y = next_xy
-            pyautogui.moveTo(x, y, duration=0.4)
+        # 2) Auto end-detection (if enabled)
+        img_bytes = img.convert("RGB").tobytes()
+        if prev_bytes is not None and not fixed_count:
+            if img_bytes == prev_bytes:
+                # duplicate detected → remove current file and stop
+                try:
+                    os.remove(path)
+                    print(f"[Auto-Stop] Detected identical page. Removed duplicate: {path}")
+                except Exception as e:
+                    print(f"[Auto-Stop] Duplicate detected but could not remove {path}: {e}")
+                break
+        prev_bytes = img_bytes
+
+        # 3) Stop if we've hit the fixed count (or cap in auto mode)
+        if fixed_count and page_index >= total_pages:
+            break
+        if (not fixed_count) and (total_pages is not None) and (page_index >= total_pages):
+            print("[Auto-Stop] Reached maximum page cap.")
+            break
+
+        # 4) Advance page
+        x, y = next_xy
+        pyautogui.moveTo(x, y, duration=0.4)
+        time.sleep(0.05)
+        if use_double_click:
+            pyautogui.click(x, y)
             time.sleep(0.05)
-            if use_double_click:
-                pyautogui.click(x, y)
-                time.sleep(0.05)
-                pyautogui.click(x, y)
-            else:
-                pyautogui.click(x, y)
-            time.sleep(delay_after_click)
+            pyautogui.click(x, y)
+        else:
+            pyautogui.click(x, y)
+        time.sleep(delay_after_click)
 
     # Build PDF inside the run folder
     run_pdf_path = os.path.join(save_dir, "book.pdf")
@@ -148,11 +180,9 @@ def main():
     if made:
         pdf_root = os.path.join(os.getcwd(), "PDF")
         os.makedirs(pdf_root, exist_ok=True)
-
         # Human-readable name: YYYY-Mon-D-HHMM.pdf  (e.g., 2025-Sep-5-1427.pdf)
         human_name = f"{session_dt:%Y}-{session_dt:%b}-{session_dt.day}-{session_dt:%H%M}.pdf"
         dest_pdf_path = os.path.join(pdf_root, human_name)
-
         try:
             shutil.copyfile(made, dest_pdf_path)
             print(f"[PDF] Copied to {dest_pdf_path}")
